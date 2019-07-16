@@ -6,9 +6,9 @@ algorithms.
 from __future__ import print_function
 from sklearn.base import BaseEstimator, ClusterMixin
 from sklearn.cluster.k_means_ import _k_init
-from sklearn.metrics.cluster import \
-    silhouette_score as sklearn_silhouette_score
-from sklearn.utils import check_random_state
+from sklearn.metrics.cluster import silhouette_score as sklearn_silhouette_score
+from sklearn.utils import check_random_state, check_array
+from sklearn.utils.validation import check_is_fitted
 from scipy.spatial.distance import cdist
 import numpy
 
@@ -17,7 +17,8 @@ from tslearn.metrics import cdist_gak, cdist_dtw, cdist_soft_dtw, \
 from tslearn.barycenters import euclidean_barycenter, \
     dtw_barycenter_averaging, softdtw_barycenter
 from tslearn.preprocessing import TimeSeriesScalerMeanVariance
-from tslearn.utils import to_time_series_dataset, to_time_series, ts_size
+from tslearn.utils import (to_time_series_dataset, to_time_series,
+                           ts_size, check_dims)
 from tslearn.cycc import cdist_normalized_cc, y_shifted_sbd_vec
 
 
@@ -42,6 +43,14 @@ class EmptyClusterError(Exception):
 
 def _check_no_empty_cluster(labels, n_clusters):
     """Check that all clusters have at least one sample assigned.
+
+    Examples
+    --------
+    >>> labels = numpy.array([1, 1, 2, 0, 2])
+    >>> _check_no_empty_cluster(labels, 3)
+    >>> _check_no_empty_cluster(labels, 4)  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    EmptyClusterError: Cluster assignments lead to at least one empty cluster
     """
 
     for k in range(n_clusters):
@@ -55,6 +64,22 @@ def _check_full_length(centroids):
 
     If some centroids are found to be padded with nans, the last value is
     repeated until the end.
+
+    Examples
+    --------
+    >>> centroids = to_time_series_dataset([[1, 2, 3], [1, 2, 3, 4, 5]])
+    >>> _check_full_length(centroids)
+    array([[[1.],
+            [2.],
+            [3.],
+            [3.],
+            [3.]],
+    <BLANKLINE>
+           [[1.],
+            [2.],
+            [3.],
+            [4.],
+            [5.]]])
     """
     centroids_ = numpy.empty(centroids.shape)
     n, max_sz = centroids.shape[:2]
@@ -261,16 +286,10 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
-        self.random_state = random_state
-        self.sigma = sigma
         self.n_init = n_init
+        self.sigma = sigma
         self.verbose = verbose
-        self.max_attempts = max(self.n_init, 10)
-
-        self.labels_ = None
-        self.inertia_ = None
-        self.sample_weight_ = None
-        self.X_fit_ = None
+        self.random_state = random_state
 
     def _get_kernel(self, X, Y=None):
         return cdist_gak(X, Y, sigma=self.sigma)
@@ -298,6 +317,8 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
         if self.verbose:
             print("")
 
+        self.iter_ = it
+
         return self
 
     def fit(self, X, y=None, sample_weight=None):
@@ -312,9 +333,26 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
             default, all time series weights are equal.
         """
 
+        X = check_array(X, allow_nd=True)
+        X = check_dims(X, X_fit=None)
+
+        if sample_weight is not None:
+            sample_weight = check_array(sample_weight, ensure_2d=False)
+
+        max_attempts = max(self.n_init, 10)
+
+        self.labels_ = None
+        self.inertia_ = None
+        self.sample_weight_ = None
+        self.X_fit_ = None
+        # n_iter_ will contain the number of iterations the most
+        # successful run required.
+        self.n_iter_ = 0
+
         n_samples = X.shape[0]
         K = self._get_kernel(X)
-        sw = sample_weight if sample_weight else numpy.ones(n_samples)
+        sw = (sample_weight if sample_weight is not None
+              else numpy.ones(n_samples))
         self.sample_weight_ = sw
         rs = check_random_state(self.random_state)
 
@@ -322,7 +360,7 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
         min_inertia = numpy.inf
         n_attempts = 0
         n_successful = 0
-        while n_successful < self.n_init and n_attempts < self.max_attempts:
+        while n_successful < self.n_init and n_attempts < max_attempts:
             try:
                 if self.verbose and self.n_init > 1:
                     print("Init %d" % (n_successful + 1))
@@ -331,16 +369,15 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
                 if self.inertia_ < min_inertia:
                     last_correct_labels = self.labels_
                     min_inertia = self.inertia_
+                    self.n_iter_ = self.iter_
                 n_successful += 1
             except EmptyClusterError:
                 if self.verbose:
                     print("Resumed because of empty cluster")
         if n_successful > 0:
-            self.X_fit_ = X
             self.labels_ = last_correct_labels
             self.inertia_ = min_inertia
-        else:
-            self.X_fit_ = None
+            self.X_fit_ = X
         return self
 
     def _compute_dist(self, K, dist):
@@ -396,6 +433,9 @@ class GlobalAlignmentKernelKMeans(BaseEstimator, ClusterMixin):
         labels : array of shape=(n_ts, )
             Index of the cluster each sample belongs to.
         """
+        X = check_array(X, allow_nd=True)
+        check_is_fitted(self, 'X_fit_')
+        X = check_dims(X, self.X_fit_)
         K = self._get_kernel(X, self.X_fit_)
         n_samples = X.shape[0]
         dist = numpy.zeros((n_samples, self.n_clusters))
@@ -513,24 +553,14 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
-        self.random_state = random_state
-        self.metric = metric
         self.n_init = n_init
-        self.verbose = verbose
+        self.metric = metric
         self.max_iter_barycenter = max_iter_barycenter
-        self.max_attempts = max(self.n_init, 10)
+        self.metric_params = metric_params
         self.dtw_inertia = dtw_inertia
+        self.verbose = verbose
+        self.random_state = random_state
         self.init = init
-
-        self.labels_ = None
-        self.inertia_ = numpy.inf
-        self.cluster_centers_ = None
-        self.X_fit_ = None
-        self._squared_inertia = True
-
-        if metric_params is None:
-            metric_params = {}
-        self.gamma_sdtw = metric_params.get("gamma_sdtw", 1.)
 
     def _fit_one_init(self, X, x_squared_norms, rs):
         n_ts, _, d = X.shape
@@ -563,6 +593,8 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
         if self.verbose:
             print("")
 
+        self.iter_ = it
+
         return self
 
     def _assign(self, X, update_class_attributes=True):
@@ -574,7 +606,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
             dists = cdist_dtw(X, self.cluster_centers_)
         elif self.metric == "softdtw":
             dists = cdist_soft_dtw(X, self.cluster_centers_,
-                                   gamma=self.gamma_sdtw)
+                                   gamma=self.gamma_sdtw_)
         else:
             raise ValueError("Incorrect metric: %s (should be one of 'dtw', "
                              "'softdtw', 'euclidean')" % self.metric)
@@ -603,7 +635,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
                 self.cluster_centers_[k] = softdtw_barycenter(
                     X=X[self.labels_ == k],
                     max_iter=self.max_iter_barycenter,
-                    gamma=self.gamma_sdtw,
+                    gamma=self.gamma_sdtw_,
                     init=self.cluster_centers_[k])
             else:
                 self.cluster_centers_[k] = euclidean_barycenter(
@@ -617,18 +649,36 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
         X : array-like of shape=(n_ts, sz, d)
             Time series dataset.
         """
+
+        X = check_array(X, allow_nd=True, force_all_finite='allow-nan')
+
+        self.labels_ = None
+        self.inertia_ = numpy.inf
+        self.cluster_centers_ = None
+        self.X_fit_ = None
+        self._squared_inertia = True
+        if self.metric_params is None:
+            metric_params = {}
+        else:
+            metric_params = self.metric_params
+        self.gamma_sdtw_ = metric_params.get("gamma_sdtw", 1.)
+
+        max_attempts = max(self.n_init, 10)
+
         X_ = to_time_series_dataset(X)
         rs = check_random_state(self.random_state)
-        x_squared_norms = cdist(X_.reshape((X_.shape[0], -1)),
-                                numpy.zeros((1, X_.shape[1] * X_.shape[2])),
-                                metric="sqeuclidean").reshape((1, -1))
+        x_squared_norms = cdist(
+            X_.reshape((X_.shape[0], -1)),
+            numpy.zeros((1, X_.shape[1] * X_.shape[2])),
+            metric="sqeuclidean"
+        ).reshape((1, -1))
         _check_initial_guess(self.init, self.n_clusters)
 
         best_correct_centroids = None
         min_inertia = numpy.inf
         n_successful = 0
         n_attempts = 0
-        while n_successful < self.n_init and n_attempts < self.max_attempts:
+        while n_successful < self.n_init and n_attempts < max_attempts:
             try:
                 if self.verbose and self.n_init > 1:
                     print("Init %d" % (n_successful + 1))
@@ -637,6 +687,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
                 if self.inertia_ < min_inertia:
                     best_correct_centroids = self.cluster_centers_.copy()
                     min_inertia = self.inertia_
+                    self.n_iter_ = self.iter_
                 n_successful += 1
             except EmptyClusterError:
                 if self.verbose:
@@ -661,6 +712,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
         labels : array of shape=(n_ts, )
             Index of the cluster each sample belongs to.
         """
+        X = check_array(X, allow_nd=True, force_all_finite='allow-nan')
         return self.fit(X, y).labels_
 
     def predict(self, X):
@@ -676,8 +728,14 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin,
         labels : array of shape=(n_ts, )
             Index of the cluster each sample belongs to.
         """
+        X = check_array(X, allow_nd=True, force_all_finite='allow-nan')
+        check_is_fitted(self, 'X_fit_')
+        X = check_dims(X, self.X_fit_)
         X_ = to_time_series_dataset(X)
         return self._assign(X_, update_class_attributes=False)
+
+    def _more_tags(self):
+        return {'allow_nan': True}
 
 
 class KShape(BaseEstimator, ClusterMixin,
@@ -751,15 +809,7 @@ class KShape(BaseEstimator, ClusterMixin,
         self.random_state = random_state
         self.n_init = n_init
         self.verbose = verbose
-        self.max_attempts = max(self.n_init, 10)
         self.init = init
-
-        self.labels_ = None
-        self.inertia_ = numpy.inf
-        self.cluster_centers_ = None
-
-        self._norms = 0.
-        self._norms_centroids = 0.
 
     def _shape_extraction(self, X, k):
         sz = X.shape[1]
@@ -833,6 +883,8 @@ class KShape(BaseEstimator, ClusterMixin,
         if self.verbose:
             print("")
 
+        self.iter_ = it
+
         return self
 
     def fit(self, X, y=None):
@@ -843,8 +895,21 @@ class KShape(BaseEstimator, ClusterMixin,
         X : array-like of shape=(n_ts, sz, d)
             Time series dataset.
         """
+        X = check_array(X, allow_nd=True)
+
+        max_attempts = max(self.n_init, 10)
+
+        self.labels_ = None
+        self.inertia_ = numpy.inf
+        self.cluster_centers_ = None
+
+        self._norms = 0.
+        self._norms_centroids = 0.
+
+        self.n_iter_ = 0
 
         X_ = to_time_series_dataset(X)
+        self.X_fit_ = X_
         self._norms = numpy.linalg.norm(X_, axis=(1, 2))
 
         _check_initial_guess(self.init, self.n_clusters)
@@ -855,7 +920,7 @@ class KShape(BaseEstimator, ClusterMixin,
         min_inertia = numpy.inf
         n_successful = 0
         n_attempts = 0
-        while n_successful < self.n_init and n_attempts < self.max_attempts:
+        while n_successful < self.n_init and n_attempts < max_attempts:
             try:
                 if self.verbose and self.n_init > 1:
                     print("Init %d" % (n_successful + 1))
@@ -864,6 +929,7 @@ class KShape(BaseEstimator, ClusterMixin,
                 if self.inertia_ < min_inertia:
                     best_correct_centroids = self.cluster_centers_.copy()
                     min_inertia = self.inertia_
+                    self.n_iter_ = self.iter_
                 n_successful += 1
             except EmptyClusterError:
                 if self.verbose:
@@ -905,7 +971,10 @@ class KShape(BaseEstimator, ClusterMixin,
         labels : array of shape=(n_ts, )
             Index of the cluster each sample belongs to.
         """
+        X = check_array(X, allow_nd=True)
+        check_is_fitted(self, 'X_fit_')
         X_ = to_time_series_dataset(X)
+        X = check_dims(X, self.X_fit_)
         X_ = TimeSeriesScalerMeanVariance(mu=0., std=1.).fit_transform(X_)
         dists = self._cross_dists(X_)
         return dists.argmin(axis=1)

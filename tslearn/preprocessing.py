@@ -87,8 +87,25 @@ class TimeSeriesScalerMinMax(TransformerMixin):
         self.min_ = min
         self.max_ = max
 
-    def fit_transform(self, X, **kwargs):
-        """Fit to data, then transform it.
+    def fit(self, X, y=None, **kwargs):
+        """A dummy method such that it complies to the sklearn requirements.
+        Since this method is completely stateless, it just returns itself.
+
+        Parameters
+        ----------
+        X : array-like
+            Time series dataset to be rescaled.
+
+        Returns
+        -------
+        self
+        """
+        return self
+
+    def transform(self, X, y=None, **kwargs):
+        """Will normalize (min-max) each of the timeseries. IMPORTANT: this
+        transformation is completely stateless, and is applied to each of
+        the timeseries individually.
 
         Parameters
         ----------

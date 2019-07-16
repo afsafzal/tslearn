@@ -40,9 +40,9 @@ def test_serializable_shapelets():
                                     random_state=0)
     clf.fit(time_series, y)
     np.testing.assert_allclose(clf.shapelets_[0],
-                               np.array([[0.563342, 0.494981],
-                                         [1.236804, 1.11963]]),
-                               atol=1e-5)
+                               np.array([[0.563, 0.494],
+                                         [1.236, 1.119]]),
+                               atol=1e-3)
     np.testing.assert_allclose(clf.predict(time_series),
                                np.array([0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0,
                                          1, 0]))
@@ -50,8 +50,8 @@ def test_serializable_shapelets():
     params = clf.get_params(deep=True)
     for s1, s2 in zip(sorted(params.keys()),
                       ['batch_size', 'learning_rate', 'max_iter',
-                       'n_shapelets_per_size', 'random_state',
-                       'verbose_level', 'weight_regularizer']):
+                       'n_shapelets_per_size', 'nr_shap_lens', 'random_state',
+                       'shap_len', 'verbose_level', 'weight_regularizer']):
         np.testing.assert_string_equal(s1, s2)
 
     from sklearn.model_selection import cross_validate
