@@ -3,6 +3,9 @@ The :mod:`tslearn.metrics` module gathers time series similarity metrics.
 """
 
 import numpy
+import concurrent.futures
+import signal
+import psutil
 from scipy.spatial.distance import pdist
 from sklearn.utils import check_random_state
 from tslearn.soft_dtw_fast import _soft_dtw, _soft_dtw_grad, _jacobian_product_sq_euc
@@ -222,6 +225,108 @@ def itakura_mask(sz1, sz2):
     return cyitakura_mask(sz1, sz2)
 
 
+def cdist_dtw_parallel(dataset1, dataset2=None, num_threads=1, global_constraint=None, sakoe_chiba_radius=1):
+    """Compute cross-similarity matrix using Dynamic Time Warping (DTW) similarity measure in parallel.
+
+    DTW is computed as the Euclidean distance between aligned time series, i.e., if :math:`P` is the alignment path:
+    $$DTW(X, Y) = \\\sqrt{\\\sum_{(i, j) \\\in P} (X_{i} - Y_{j})^2}$$
+
+    DTW was originally presented in [1]_.
+
+    Parameters
+    ----------
+    dataset1 : array-like
+        A dataset of time series
+    dataset2 : array-like (default: None)
+        Another dataset of time series. If `None`, self-similarity of `dataset1` is returned.
+    num_threads: int (default: 1)
+        Number of processes to use for calculations.
+    global_constraint : {"itakura", "sakoe_chiba"} or None (default: None)
+        Global constraint to restrict admissible paths for DTW.
+    sakoe_chiba_radius : int (default: 1)
+        Radius to be used for Sakoe-Chiba band global constraint. Used only if global_constraint is "sakoe_chiba".
+
+    Returns
+    -------
+    numpy.ndarray
+        Cross-similarity matrix
+
+    Examples
+    --------
+    >>> cdist_dtw([[1, 2, 2, 3], [1., 2., 3., 4.]])  # doctest: +NORMALIZE_WHITESPACE
+    array([[ 0., 1.],
+           [ 1., 0.]])
+    >>> cdist_dtw([[1, 2, 2, 3], [1., 2., 3., 4.]], [[1, 2, 3], [2, 3, 4, 5]])  # doctest: +NORMALIZE_WHITESPACE +ELLIPSIS
+    array([[ 0. ,  2.449...],
+           [ 1. ,  1.414...]])
+
+    See Also
+    --------
+    dtw : Get DTW similarity score
+
+    References
+    ----------
+    .. [1] H. Sakoe, S. Chiba, "Dynamic programming algorithm optimization for spoken word recognition,"
+       IEEE Transactions on Acoustics, Speech and Signal Processing, vol. 26(1), pp. 43--49, 1978.
+    """
+    dataset1 = to_time_series_dataset(dataset1)
+    self_similarity = False
+    if dataset2 is None:
+        dataset2 = dataset1
+        self_similarity = True
+    else:
+        dataset2 = to_time_series_dataset(dataset2)
+    sz1 = dataset1.shape[1]
+    sz2 = dataset2.shape[1]
+    n1 = dataset1.shape[0]
+    n2 = dataset2.shape[0]
+    cross_dist = numpy.zeros((n1,n2))
+    future_i_j = {}
+    if global_constraint == "sakoe_chiba":
+        mask=sakoe_chiba_mask(sz1, sz2, radius=sakoe_chiba_radius)
+    elif global_constraint == "itakura":
+        mask=itakura_mask(sz1, sz2)
+    else:
+        mask=numpy.zeros((sz1, sz2))
+
+    def kill_child_processes(parent_pid, sig=signal.SIGTERM):
+        try:
+            parent = psutil.Process(parent_pid)
+        except psutil.NoSuchProcess:
+            return
+        children = parent.children(recursive=True)
+        for process in children:
+            if process.name() not in ["python", "Python"]:
+                continue
+            print("killing process %d", process.pid)
+            process.send_signal(sig)
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+
+        for i in range(n1):
+            for j in range(n2):
+                if (self_similarity and i < j) or not self_similarity:
+                    future_i_j[executor.submit(cydtw,
+                                               dataset1[i],
+                                               dataset2[j],
+                                               mask)] = (i, j)
+        try:
+            for future in concurrent.futures.as_completed(future_i_j):
+                i, j = future_i_j[future]
+                dist = future.result()
+                cross_dist[i][j] = dist
+                if self_similarity:
+                    cross_dist[j][i] = dist
+        except (KeyboardInterrupt, SystemExit):
+            print("Received keyboard interrupt. Shutting down...")
+            for fut in future_i_j.keys():
+                fut.cancel()
+            executor.shutdown(wait=False)
+            kill_child_processes(os.getpid())
+            raise KeyboardInterrupt
+    return cross_dist
+
+ 
 def cdist_dtw(dataset1, dataset2=None, global_constraint=None, sakoe_chiba_radius=1):
     """Compute cross-similarity matrix using Dynamic Time Warping (DTW) similarity measure.
 

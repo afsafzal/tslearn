@@ -10,7 +10,7 @@ from sklearn.utils import check_random_state
 from scipy.spatial.distance import cdist
 import numpy
 
-from tslearn.metrics import cdist_gak, cdist_dtw, cdist_soft_dtw, cdist_soft_dtw_normalized, dtw
+from tslearn.metrics import cdist_gak, cdist_dtw, cdist_soft_dtw, cdist_soft_dtw_normalized, dtw, cdist_dtw_parallel
 from tslearn.barycenters import EuclideanBarycenter, dtw_barycenter_averaging, SoftDTWBarycenter
 from tslearn.preprocessing import TimeSeriesScalerMeanVariance
 from tslearn.utils import to_time_series_dataset, to_time_series, ts_size
@@ -522,6 +522,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
         if metric_params is None:
             metric_params = {}
         self.gamma_sdtw = metric_params.get("gamma_sdtw", 1.)
+        self.num_threads = metric_params.get("num_threads", 1)
 
     def _fit_one_init(self, X, x_squared_norms, rs):
         n_ts, _, d = X.shape
@@ -561,6 +562,8 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
             dists = cdist_dtw(X, self.cluster_centers_)
         elif self.metric == "softdtw":
             dists = cdist_soft_dtw(X, self.cluster_centers_, gamma=self.gamma_sdtw)
+        elif self.metric == "dtwparallel":
+            dists = cdist_dtw_parallel(X, self.cluster_centers_, num_threads=self.num_threads)
         else:
             raise ValueError("Incorrect metric: %s (should be one of 'dtw', 'softdtw', 'euclidean')" % self.metric)
         matched_labels = dists.argmin(axis=1)
@@ -576,7 +579,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
 
     def _update_centroids(self, X):
         for k in range(self.n_clusters):
-            if self.metric == "dtw":
+            if self.metric == "dtw" or self.metric == "dtwparallel":
                 self.cluster_centers_[k] = dtw_barycenter_averaging(X=X[self.labels_ == k],
                                                                     barycenter_size=None,
                                                                     init_barycenter=self.cluster_centers_[k],
