@@ -11,7 +11,7 @@ from scipy.spatial.distance import cdist
 import numpy
 
 from tslearn.metrics import cdist_gak, cdist_dtw, cdist_soft_dtw, cdist_soft_dtw_normalized, dtw, cdist_dtw_parallel
-from tslearn.barycenters import EuclideanBarycenter, dtw_barycenter_averaging, SoftDTWBarycenter
+from tslearn.barycenters import EuclideanBarycenter, dtw_barycenter_averaging, SoftDTWBarycenter, dtw_barycenter_averaging_parallel
 from tslearn.preprocessing import TimeSeriesScalerMeanVariance
 from tslearn.utils import to_time_series_dataset, to_time_series, ts_size
 from tslearn.cycc import cdist_normalized_cc, y_shifted_sbd_vec
@@ -523,6 +523,8 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
             metric_params = {}
         self.gamma_sdtw = metric_params.get("gamma_sdtw", 1.)
         self.num_threads = metric_params.get("num_threads", 1)
+        self.global_constraint = metric_params.get("global_constraint", None)
+        self.sakoe_chiba_radius = metric_params.get("sakoe_chiba_radius", 1)
 
     def _fit_one_init(self, X, x_squared_norms, rs):
         n_ts, _, d = X.shape
@@ -559,18 +561,18 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
             dists = cdist(X.reshape((X.shape[0], -1)), self.cluster_centers_.reshape((self.n_clusters, -1)),
                           metric="euclidean")
         elif self.metric == "dtw":
-            dists = cdist_dtw(X, self.cluster_centers_)
+            dists = cdist_dtw(X, self.cluster_centers_, self.global_constraint, self.sakoe_chiba_radius)
         elif self.metric == "softdtw":
             dists = cdist_soft_dtw(X, self.cluster_centers_, gamma=self.gamma_sdtw)
         elif self.metric == "dtwparallel":
-            dists = cdist_dtw_parallel(X, self.cluster_centers_, num_threads=self.num_threads)
+            dists = cdist_dtw_parallel(X, self.cluster_centers_, self.num_threads, self.global_constraint, self.sakoe_chiba_radius)
         else:
             raise ValueError("Incorrect metric: %s (should be one of 'dtw', 'softdtw', 'euclidean')" % self.metric)
         matched_labels = dists.argmin(axis=1)
         if update_class_attributes:
             self.labels_ = matched_labels
             _check_no_empty_cluster(self.labels_, self.n_clusters)
-            if self.dtw_inertia and self.metric != "dtw":
+            if self.dtw_inertia and self.metric != "dtw" and self.metric != "dtwparallel":
                 inertia_dists = cdist_dtw(X, self.cluster_centers_)
             else:
                 inertia_dists = dists
@@ -579,15 +581,22 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
 
     def _update_centroids(self, X):
         for k in range(self.n_clusters):
-            if self.metric == "dtw" or self.metric == "dtwparallel":
+            if self.metric == "dtw":
                 self.cluster_centers_[k] = dtw_barycenter_averaging(X=X[self.labels_ == k],
                                                                     barycenter_size=None,
                                                                     init_barycenter=self.cluster_centers_[k],
-                                                                    verbose=False)
+                                                                    verbose=self.verbose)
                     # DTWBarycenterAveraging(max_iter=self.max_iter_barycenter,
                     #                                               barycenter_size=None,
                     #                                               init_barycenter=self.cluster_centers_[k],
                     #                                               verbose=False).fit(X[self.labels_ == k])
+            elif self.metric == "dtwparallel":
+                self.cluster_centers_[k] = dtw_barycenter_averaging_parallel(X=X[self.labels_ == k],
+                                                                    barycenter_size=None,
+                                                                    init_barycenter=self.cluster_centers_[k],
+                                                                    verbose=self.verbose,
+                                                                    max_iter=10,
+                                                                    num_threads=self.num_threads)
             elif self.metric == "softdtw":
                 self.cluster_centers_[k] = SoftDTWBarycenter(max_iter=self.max_iter_barycenter,
                                                              gamma=self.gamma_sdtw,

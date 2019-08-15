@@ -9,6 +9,10 @@ from scipy.interpolate import interp1d
 from scipy.optimize import minimize
 from sklearn.exceptions import ConvergenceWarning
 import warnings
+import concurrent.futures
+import signal
+import psutil
+import os
 
 from tslearn.utils import to_time_series_dataset, check_equal_size, to_time_series
 from tslearn.preprocessing import TimeSeriesResampler
@@ -231,6 +235,47 @@ def _init_avg(X, barycenter_size):
         f = interp1d(numpy.linspace(0, 1, X_avg.shape[0]), X_avg, kind="linear", axis=0)
         return f(xnew)
 
+def _petitjean_assignment_parallel(X, barycenter, num_threads=1):
+    n = X.shape[0]
+    barycenter_size = barycenter.shape[0]
+    assign = ([[] for _ in range(barycenter_size)], [[] for _ in range(barycenter_size)])
+
+    def kill_child_processes(parent_pid, sig=signal.SIGTERM):
+        try:
+            parent = psutil.Process(parent_pid)
+        except psutil.NoSuchProcess:
+            return
+        children = parent.children(recursive=True)
+        for process in children:
+            if process.name() not in ["python", "Python"]:
+                continue
+            print("killing process %d", process.pid)
+            process.send_signal(sig)
+
+    future_i = {}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+
+        for i in range(n):
+            future_i[executor.submit(dtw_path,
+                                     X[i],
+                                     barycenter)] = i
+        try:
+            for future in concurrent.futures.as_completed(future_i):
+                i = future_i[future]
+                path, _ = future.result()
+                for pair in path:
+                    assign[0][pair[1]].append(i)
+                    assign[1][pair[1]].append(pair[0])
+        except (KeyboardInterrupt, SystemExit):
+            print("Received keyboard interrupt. Shutting down...")
+            for fut in future_i.keys():
+                fut.cancel()
+            executor.shutdown(wait=False)
+            kill_child_processes(os.getpid())
+            raise KeyboardInterrupt
+
+    return assign
+
 
 def _petitjean_assignment(X, barycenter):
     n = X.shape[0]
@@ -258,6 +303,86 @@ def _petitjean_cost(X, barycenter, assign, weights):
         for i_ts, t_ts in zip(assign[0][t_barycenter], assign[1][t_barycenter]):
             cost += weights[i_ts] * numpy.linalg.norm(X[i_ts, t_ts] - barycenter[t_barycenter]) ** 2
     return cost / weights.sum()
+
+
+def dtw_barycenter_averaging_parallel(X, barycenter_size=None, init_barycenter=None, max_iter=30, tol=1e-5, weights=None,
+                             verbose=False, num_threads=1):
+    """DTW Barycenter Averaging (DBA) method.
+
+    DBA was originally presented in [1]_.
+
+    Parameters
+    ----------
+    X : array-like, shape=(n_ts, sz, d)
+        Time series dataset.
+    barycenter_size : int or None (default: None)
+        Size of the barycenter to generate. If None, the size of the barycenter is that of the data provided at fit
+        time or that of the initial barycenter if specified.
+    init_barycenter : array or None (default: None)
+        Initial barycenter to start from for the optimization process.
+    max_iter : int (default: 30)
+        Number of iterations of the Expectation-Maximization optimization procedure.
+    tol : float (default: 1e-5)
+        Tolerance to use for early stopping: if the decrease in cost is lower than this value, the
+        Expectation-Maximization procedure stops.
+    weights: None or array
+        Weights of each X[i]. Must be the same size as len(X).
+    verbose : boolean (default: False)
+        Whether to print information about the cost at each iteration or not.
+
+    Returns
+    -------
+    numpy.array of shape (barycenter_size, d) or (sz, d) if barycenter_size is None
+        DBA barycenter of the provided time series dataset.
+
+    Examples
+    --------
+    >>> time_series = [[1, 2, 3, 4], [1, 2, 4, 5]]
+    >>> euc_bar = euclidean_barycenter(time_series)
+    >>> dba_bar = dtw_barycenter_averaging(time_series, max_iter=0)
+    >>> dba_bar.shape
+    (4, 1)
+    >>> numpy.alltrue(numpy.abs(euc_bar - dba_bar) < 1e-9)  # Because 0 iterations of DBA were performed
+    True
+    >>> dtw_barycenter_averaging(time_series, max_iter=0, barycenter_size=5).shape
+    (5, 1)
+    >>> dtw_barycenter_averaging(time_series, max_iter=5, barycenter_size=5, verbose=True).shape  # doctest: +ELLIPSIS
+    [DBA] epoch 1, cost: ...
+    (5, 1)
+    >>> dba_bar = dtw_barycenter_averaging(time_series)  # doctest: +ELLIPSIS
+    >>> X = to_time_series_dataset([[1, 2, 3, 4], [1, 2, 3], [2, 5, 6, 7, 8, 9]])
+    >>> bar = dtw_barycenter_averaging(X, barycenter_size=3)
+
+    References
+    ----------
+    .. [1] F. Petitjean, A. Ketterlin & P. Gancarski. A global averaging method for dynamic time warping, with
+       applications to clustering. Pattern Recognition, Elsevier, 2011, Vol. 44, Num. 3, pp. 678-693
+    """
+    X_ = to_time_series_dataset(X)
+    if barycenter_size is None:
+        barycenter_size = X_.shape[1]
+    weights = _set_weights(weights, X_.shape[0])
+    if init_barycenter is None:
+        barycenter = _init_avg(X_, barycenter_size)
+    else:
+        barycenter_size = init_barycenter.shape[0]
+        barycenter = init_barycenter
+    cost_prev, cost = numpy.inf, numpy.inf
+    for it in range(max_iter):
+        assign = _petitjean_assignment_parallel(X_, barycenter, num_threads)
+        cost = _petitjean_cost(X_, barycenter, assign, weights)
+        if verbose:
+            print("[DBA] epoch %d, cost: %.3f" % (it + 1, cost))
+        barycenter = _petitjean_update_barycenter(X_, assign, barycenter_size, weights)
+        if abs(cost_prev - cost) < tol:
+            break
+        elif cost_prev < cost:
+            warnings.warn("DBA loss is increasing while it should not be. Stopping optimization.", ConvergenceWarning)
+            break
+        else:
+            cost_prev = cost
+    return barycenter
+
 
 
 def dtw_barycenter_averaging(X, barycenter_size=None, init_barycenter=None, max_iter=30, tol=1e-5, weights=None,

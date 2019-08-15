@@ -6,6 +6,7 @@ import numpy
 import concurrent.futures
 import signal
 import psutil
+import os
 from scipy.spatial.distance import pdist
 from sklearn.utils import check_random_state
 from tslearn.soft_dtw_fast import _soft_dtw, _soft_dtw_grad, _jacobian_product_sq_euc
