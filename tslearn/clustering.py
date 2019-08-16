@@ -99,6 +99,23 @@ def _compute_inertia(distances, assignments, squared=True):
         return numpy.sum(distances[numpy.arange(n_ts), assignments]) / n_ts
 
 
+def _compute_inertia_label_based(distances, assignments):
+    """Derive inertia (average of squared distances) from pre-computed distances and assignments.
+
+    Examples
+    --------
+    >>> dists = numpy.array([[1., 2., 0.5], [0., 3., 1.]])
+    >>> assign = numpy.array([2, 0])
+    >>> _compute_inertia(dists, assign)
+    0.125
+    """
+    n_ts = distances.shape[0]
+    n_centroids = distances.shape[1]
+
+    label_based = numpy.array([distances[assignments==i, i] for i in range(n_centroids)])
+    return numpy.array([(numpy.mean(d), numpy.std(d)) for d in label_based])
+
+
 def silhouette_score(X, labels, metric=None, sample_size=None, metric_params=None,
                      random_state=None, **kwds):
     """Compute the mean Silhouette Coefficient of all samples (cf.  [1]_ and  [2]_).
@@ -500,7 +517,7 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
     """
 
     def __init__(self, n_clusters=3, max_iter=50, tol=1e-6, n_init=1, metric="euclidean", max_iter_barycenter=100,
-                 metric_params=None, dtw_inertia=False, verbose=True, random_state=None, init='k-means++'):
+                 metric_params=None, dtw_inertia=False, verbose=True, random_state=None, init='k-means++', store_label_based_inertia=False):
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
@@ -511,6 +528,8 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
         self.max_iter_barycenter = max_iter_barycenter
         self.max_attempts = max(self.n_init, 10)
         self.dtw_inertia = dtw_inertia
+        self.store_label_based_inertia = True
+        self.label_based_inertia = None
         self.init = init
 
         self.labels_ = None
@@ -576,6 +595,8 @@ class TimeSeriesKMeans(BaseEstimator, ClusterMixin, TimeSeriesCentroidBasedClust
                 inertia_dists = cdist_dtw(X, self.cluster_centers_)
             else:
                 inertia_dists = dists
+            if self.store_label_based_inertia:
+                self.label_based_inertia = _compute_inertia_label_based(inertia_dists, self.labels_)
             self.inertia_ = _compute_inertia(inertia_dists, self.labels_, self._squared_inertia)
         return matched_labels
 
