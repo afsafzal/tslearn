@@ -13,6 +13,9 @@ import concurrent.futures
 import signal
 import psutil
 import os
+from scipy.spatial.distance import sqeuclidean
+
+from fastdtw import fastdtw
 
 from tslearn.utils import to_time_series_dataset, check_equal_size, to_time_series
 from tslearn.preprocessing import TimeSeriesResampler
@@ -256,13 +259,14 @@ def _petitjean_assignment_parallel(X, barycenter, num_threads=1):
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
 
         for i in range(n):
-            future_i[executor.submit(dtw_path,
-                                     X[i],
-                                     barycenter)] = i
+            future_i[executor.submit(fastdtw,
+                                     X[i][~numpy.isnan(X[i]).any(axis=1)],
+                                     barycenter,
+                                     dist=sqeuclidean)] = i
         try:
             for future in concurrent.futures.as_completed(future_i):
                 i = future_i[future]
-                path, _ = future.result()
+                _, path = future.result()
                 for pair in path:
                     assign[0][pair[1]].append(i)
                     assign[1][pair[1]].append(pair[0])
